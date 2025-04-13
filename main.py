@@ -23,20 +23,7 @@ logging.basicConfig(
 )
 
 
-async def shutdown(signal, loop, listener):
-    """Cleanup tasks tied to the service's shutdown."""
-    logging.info(f"Received exit signal {signal.name}...")
-    await listener.stop()
-    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    [task.cancel() for task in tasks]
-    logging.info("Cancelling outstanding tasks")
-    await asyncio.gather(*tasks, return_exceptions=True)
-    loop.stop()
-
-
 async def main():
-    """Main function to run the IMAP IDLE listener"""
-    # Initialize listener
     listener = IMAPIdleListener(
         host=IMAP_SERVER,
         port=IMAP_PORT,
@@ -46,18 +33,11 @@ async def main():
         idle_timeout=CHECK_FREQUENCY * 60,
     )
 
-    loop = asyncio.get_running_loop()
-    # signals = [signal.SIGTERM, signal.SIGINT]
-    # for s in signals:
-    #     loop.add_signal_handler(
-    #         s, lambda s=s: asyncio.create_task(shutdown(s, loop, listener))
-    #     )
-
     try:
         logging.info("Starting IMAP IDLE listener")
         await listener.start_idle()
     except Exception as e:
-        logging.error(f"Error in main: {str(e)}")
+        logging.error(f"Error in main: {e}", exc_info=True)
         await listener.stop()
 
 
@@ -67,6 +47,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logging.info("Keyboard interrupt received, exiting...")
     except Exception as e:
-        logging.error(f"Unexpected error: {str(e)}")
+        logging.error(f"Unexpected error: {e}", exc_info=True)
     finally:
         logging.info("IMAP IDLE listener stopped")

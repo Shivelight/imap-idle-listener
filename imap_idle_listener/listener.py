@@ -3,6 +3,7 @@ import logging
 import os
 import re
 from email.parser import BytesParser
+from email.policy import default as default_policy
 
 import httpx
 from aioimaplib import aioimaplib
@@ -71,26 +72,22 @@ class IMAPIdleListener:
 
     async def process_email(self, email_id):
         try:
-            # Fetch the entire email
             response = await self.client.fetch(email_id, "(BODY[])")
             if response.result != "OK":
                 self.logger.error(f"Failed to fetch email {email_id}")
                 return
 
-            # Parse the email content
             raw_email = response.lines[1]
-            email_message = BytesParser().parsebytes(raw_email)
+            email_message = BytesParser(policy=default_policy).parsebytes(raw_email)  # type: ignore
             verification_code = None
             for part in email_message.walk():
                 content_type = part.get_content_type()
 
-                # Get HTML content
                 if content_type == "text/html":
                     payload = part.get_payload(decode=True)
                     if payload:
                         html_content = payload.decode("utf-8")
                         # plain_text = html2text(html_content)
-                        # Extract verification code from HTML
                         code_match = re.search(
                             r'<p style="font-size:20px;margin-top:15px;">(\d+)</p>',
                             html_content,
@@ -127,9 +124,7 @@ class IMAPIdleListener:
                 idle_task = await self.client.idle_start()
 
                 try:
-                    await asyncio.wait_for(
-                        self.client.wait_server_push(), timeout=self.idle_timeout
-                    )
+                    await self.client.wait_server_push(timeout=self.idle_timeout)
                 except asyncio.TimeoutError:
                     self.logger.debug("IDLE timeout, checking for new emails")
                 finally:
@@ -137,8 +132,8 @@ class IMAPIdleListener:
                     await asyncio.wait_for(idle_task, timeout=10)
 
         except Exception as e:
-            self.logger.error(f"Error in IDLE mode: {str(e)}")
-            raise IMAPIDLEError(f"IDLE mode failed: {str(e)}")
+            self.logger.error(f"Error in IDLE mode: {e}", exc_info=True)
+            raise IMAPIDLEError(f"IDLE mode failed: {e}")
 
     async def stop(self):
         self.logger.info("Stopping IDLE listener")
@@ -147,6 +142,6 @@ class IMAPIdleListener:
             try:
                 await self.client.logout()
             except Exception as e:
-                self.logger.error(f"Error during logout: {str(e)}")
+                self.logger.error(f"Error during logout: {e}", exc_info=True)
             finally:
                 self.client = None
