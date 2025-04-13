@@ -100,11 +100,10 @@ class IMAPIdleListener:
             if verification_code:
                 async with httpx.AsyncClient() as client:
                     await client.post(
-                        "https://api.fonnte.com/send",
-                        headers={"Authorization": os.environ["FONNTE_TOKEN"]},
-                        data={
-                            "target": os.environ["FONNTE_TARGET"],
-                            "message": verification_code,
+                        os.environ["GREEN_API_SENDMESSAGE_URL"],
+                        json={
+                            "chatId": os.environ["GREEN_API_SENDMESSAGE_TARGET"],
+                            "message": f"{verification_code}",
                         },
                     )
 
