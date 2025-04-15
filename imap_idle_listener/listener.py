@@ -1,42 +1,56 @@
 import asyncio
 import logging
-import os
-import re
+from collections.abc import Callable
+from email.message import Message
 from email.parser import BytesParser
 from email.policy import default as default_policy
+from typing import Any, Coroutine
 
-import httpx
 from aioimaplib import aioimaplib
 
 from .exceptions import IMAPAuthError, IMAPConnectionError, IMAPIDLEError
 
 
 class IMAPIdleListener:
-    def __init__(
-        self, host, port, username, password, mailbox="INBOX", idle_timeout=29 * 60
-    ):
-        """
-        Initialize the IMAP IDLE listener
+    """
+    Monitors an IMAP mailbox for new emails using the IDLE command.
 
-        Args:
-            host: IMAP server host
-            port: IMAP server port
-            username: Email address
-            password: Email password
-            mailbox: Mailbox to monitor (default: INBOX)
-            idle_timeout: Timeout for IDLE mode in seconds (default: 29 minutes)
-        """
+    Connects to an IMAP server, listens for new emails in real-time,
+    and processes them using custom functions or coroutines.
+
+    Attributes:
+        host (str): IMAP server hostname.
+        port (int): IMAP server port.
+        username (str): Email address for authentication.
+        password (str): Password for authentication.
+        mailbox (str): Mailbox to monitor (default: "INBOX").
+        idle_timeout (int): Timeout for IDLE mode in seconds (default: 15 minutes).
+        email_processors (list): List of functions or coroutines to process emails.
+
+    """
+
+    def __init__(
+        self,
+        host,
+        port,
+        username,
+        password,
+        mailbox="INBOX",
+        idle_timeout=15 * 60,
+        email_processors=None,
+    ):
         self.host = host
         self.port = port
         self.username = username
         self.password = password
         self.mailbox = mailbox
         self.idle_timeout = idle_timeout
-        self.client = None
+        self.client: aioimaplib.IMAP4_SSL | None = None
         self._stop_event = asyncio.Event()
         self.logger = logging.getLogger(__name__)
+        self.email_processors = email_processors if email_processors is not None else []
 
-    async def connect(self):
+    async def connect(self) -> bool:
         try:
             self.client = aioimaplib.IMAP4_SSL(host=self.host, port=self.port)
             await self.client.wait_hello_from_server()
@@ -55,10 +69,11 @@ class IMAPIdleListener:
 
             return True
         except Exception as e:
-            self.logger.error(f"Connection error: {str(e)}")
-            raise IMAPConnectionError(f"Connection failed: {str(e)}")
+            self.logger.error(f"Connection error: {e}", exc_info=True)
+            raise IMAPConnectionError(f"Connection failed: {e}")
 
-    async def fetch_new_emails(self):
+    async def fetch_new_emails(self) -> None:
+        assert self.client is not None, "Client is not connected"
         self.logger.info("Checking for new emails...")
         response = await self.client.search("UNSEEN")
         if response.result == "OK":
@@ -70,7 +85,8 @@ class IMAPIdleListener:
             else:
                 self.logger.debug("No new emails found")
 
-    async def process_email(self, email_id):
+    async def process_email(self, email_id: str) -> None:
+        assert self.client is not None, "Client is not connected"
         try:
             response = await self.client.fetch(email_id, "(BODY[])")
             if response.result != "OK":
@@ -79,40 +95,34 @@ class IMAPIdleListener:
 
             raw_email = response.lines[1]
             email_message = BytesParser(policy=default_policy).parsebytes(raw_email)  # type: ignore
-            verification_code = None
-            for part in email_message.walk():
-                content_type = part.get_content_type()
+            self.logger.info(
+                f"Processing email {email_id} - Subject: {email_message['subject']}"
+            )
 
-                if content_type == "text/html":
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        html_content = payload.decode("utf-8")
-                        # plain_text = html2text(html_content)
-                        code_match = re.search(
-                            r'<p style="font-size:20px;margin-top:15px;">(\d+)</p>',
-                            html_content,
-                        )
-                        if code_match:
-                            verification_code = code_match.group(1)
-
-            self.logger.info(f"Processing email - Subject: {email_message['subject']}")
-
-            if verification_code:
-                async with httpx.AsyncClient() as client:
-                    await client.post(
-                        os.environ["GREEN_API_SENDMESSAGE_URL"],
-                        json={
-                            "chatId": os.environ["GREEN_API_SENDMESSAGE_TARGET"],
-                            "message": f"{verification_code}",
-                        },
-                    )
+            for processor in self.email_processors:
+                if asyncio.iscoroutinefunction(processor):
+                    await processor(email_message, self)
+                else:
+                    processor(email_message, self)
 
         except Exception as e:
-            self.logger.error(f"Error processing email {email_id}: {str(e)}")
+            self.logger.error(f"Error processing email {email_id}: {e}", exc_info=True)
 
-    async def start_idle(self):
-        if not self.client:
-            await self.connect()
+    def add_email_processor(
+        self,
+        processor: Callable[[Message, "IMAPIdleListener"], None]
+        | Callable[[Message, "IMAPIdleListener"], Coroutine[Any, Any, None]],
+    ) -> None:
+        """
+        Add a custom email processor.
+
+        Args:
+            processor: A function or coroutine to process emails.
+        """
+        self.email_processors.append(processor)
+
+    async def start_idle(self) -> None:
+        assert self.client is not None, "Client is not connected"
 
         self.logger.info("Starting IDLE mode")
         try:
@@ -134,7 +144,8 @@ class IMAPIdleListener:
             self.logger.error(f"Error in IDLE mode: {e}", exc_info=True)
             raise IMAPIDLEError(f"IDLE mode failed: {e}")
 
-    async def stop(self):
+    async def stop(self) -> None:
+        assert self.client is not None, "Client is not connected"
         self.logger.info("Stopping IDLE listener")
         self._stop_event.set()
         if self.client:
